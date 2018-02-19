@@ -1,0 +1,38 @@
+blob_detector:
+  # Change thresholds
+  minThreshold: 10
+  maxThreshold: 250
+
+  # Filter by Area.
+  filterByArea: True
+  minArea: 500 # 500 for real case; 1000 for test case protolowry 50
+  maxArea: 810 # 1000 for real case; 4000 for test case protolowry 150
+
+  # Filter by Circularity
+  filterByCircularity: False
+  minCircularity: 0.1
+   
+  # Filter by Convexity
+  filterByConvexity: False
+  minConvexity: 0.87
+   
+  # Filter by Inertia
+  filterByInertia: False
+  minInertiaRatio: 0.01
+
+Camera:
+  topic_rect: /overhead2/image_rect
+  topic_info: /overhead2/camera_info
+  topic_ueye: /ueye_cam_nodelet
+
+Localizer:
+  budger_distance_3d: 0.3048 # unit: meter protolowry 0.15108
+  budger_distance_2d: 170.0 # unit: pixel protolowry 170.0
+  tolerance_3d: 0.001 # unit: meter protolowry 0.001
+  tolerance_2d: 40.0 # unit: pixel protolowry 40.0 
+  max_iteration: 10
+  min_difference_xyz: 0.005 # unit: meter protolowry 0.005  
+  min_difference_rpy: 0.01 # unit: radian  protolowry 0.01
+  ROI: [1150, 1100, 1576, 1738] # a selected region of budgers protolowry [1150, 1100, 1576, 1738] 
+  use_mouse_select: True
+  resize_ratio: 2
