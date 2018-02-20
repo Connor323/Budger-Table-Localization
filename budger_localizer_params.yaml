@@ -26,6 +26,7 @@ Camera:
   topic_ueye: /ueye_cam_nodelet
 
 Localizer:
+  result_Path: camera_localization_results
   budger_distance_3d: 0.3048 # unit: meter protolowry 0.15108
   budger_distance_2d: 170.0 # unit: pixel protolowry 170.0
   tolerance_3d: 0.001 # unit: meter protolowry 0.001
@@ -36,3 +37,4 @@ Localizer:
   ROI: [1150, 1100, 1576, 1738] # a selected region of budgers protolowry [1150, 1100, 1576, 1738] 
   use_mouse_select: True
   resize_ratio: 2
+  real_origin_coordinates: [0, 0] # overhead 2: 7, 2

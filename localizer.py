@@ -1,14 +1,18 @@
+import os
 import cv2
 import copy
 import yaml
 import numpy as np 
 from tf import transformations
+from subprocess import call 
 
 from blob_detector import Detector
 from camera import Camera 
 
 params_file = open("budger_localizer_params.yaml", "r")
 params = yaml.load(params_file)
+
+call(["mkdir", "-p", params["Localizer"]["result_Path"]])
 
 class Localizer:
     def __init__(self):
@@ -24,6 +28,30 @@ class Localizer:
         # performed
         if event == cv2.EVENT_LBUTTONDOWN:
             self.ROI += [x, y]
+
+    def getRealOriginCoordinates(self):
+        """
+        @brief      obtain the real-world coordinates for the origin point 
+                
+        @return     real_origin_coordinates: [x, y] where x, y are integer
+        """
+        real_origin_coordinates = None
+        while real_origin_coordinates is None:
+            tmp = raw_input("Please input the origin coordinates (x, y) in real world (default %d, %d): " %\
+                                 (params["Localizer"]["real_origin_coordinates"][0], params["Localizer"]["real_origin_coordinates"][1]))
+            try:
+                tmp = [int(ss) for ss in tmp.split(",")]
+            except ValueError:
+                if len(tmp) != 0:
+                    print "Input is not a valid format. Should be: x, y"
+                else:
+                    real_origin_coordinates = params["Localizer"]["real_origin_coordinates"]
+                continue
+            if len(tmp) == 2:
+                real_origin_coordinates = tmp
+            else:
+                print "Input is not a valid format. Should be: x, y"
+        return real_origin_coordinates
 
     def localize(self, image=None):
         """
@@ -81,24 +109,47 @@ class Localizer:
             points, points3d = self.movePoints(points3d, k, extrinsic)
             self.drawPointsAndShow(points, xys, original_image.copy(), isFinal=False)
             k = cv2.waitKey()
+        cv2.destroyAllWindows()
+
+        real_origin_coordinates = self.getRealOriginCoordinates()
         
-        fianl_extrinsic = self.computeExtrinsic(points, points3d_original)
+        fianl_extrinsic = self.computeExtrinsic(points, points3d_original, real_origin_coordinates)
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), H)[0]
+        
+        cv2.imshow("Original Image", self.resize(image_with_circles))
         self.drawPointsAndShow(points, xys, image.copy(), isFinal=True)
+        
         pose = self.convertExtrinsic2Pose(fianl_extrinsic, inverse=True)
+        self.savePoseInXML(pose)
         return pose, fianl_extrinsic
 
-    def transformPts(self, points3d, extrinsic):
-        points = []
-        for pt3d in points3d:
-            pt3d = pt3d.tolist()
-            pt3d.append(1)
-            pt = self.camera.camera_P.dot(extrinsic.dot(np.reshape(pt3d, [4, 1]))).flatten()
-            pt = pt[:2] / pt[2]
-            points.append(pt)
-        return points
-
     def movePoints(self, points3d, key, extrinsic):
+        """
+        @brief      Move the 3D points given the keyboard command
+        
+        @param      points3d: 3D points, [[x, y, z], [x, y, z], ...]
+        @param      key: keyboard command
+        @param      extrinsic: 3*4 extrinsic matrix
+        
+        @return     points: 2D points [[x, y], [x, y], ...]
+        @return     points3d: 3D points [[x, y, z], [x, y, z], ...]
+        """
+        def applyRotationM(points3d, M):
+            points3d_tmp = points3d.copy()
+            points3d_tmp[:, 2] = 1
+            points3d[:, :2] = M.dot(points3d_tmp.T).T
+            return points3d
+
+        def transformPts(points3d, extrinsic):
+            points = []
+            for pt3d in points3d:
+                pt3d = pt3d.tolist()
+                pt3d.append(1)
+                pt = self.camera.camera_P.dot(extrinsic.dot(np.reshape(pt3d, [4, 1]))).flatten()
+                pt = pt[:2] / pt[2]
+                points.append(pt)
+            return points
+
         points3d = np.array(points3d).copy()
 
         if key == 82: # up
@@ -113,14 +164,32 @@ class Localizer:
         elif key == 83: # right
             print "Detected key: right"
             points3d[:, 1] += params["Localizer"]["budger_distance_3d"]
+        elif key == 55: # num: 7, left rotation
+            print "Detected key: rotate left"
+            M = cv2.getRotationMatrix2D((points3d[0, 0], points3d[0, 1]), 90, 1)
+            points3d = applyRotationM(points3d, M)
+        elif key == 56: # num: 8, right rotation
+            print "Detected key: rotate right"
+            M = cv2.getRotationMatrix2D((points3d[0, 0], points3d[0, 1]), -90, 1)
+            points3d = applyRotationM(points3d, M)
         else:
             print "   !!!! Unkown key detected"
 
-        points = self.transformPts(points3d, extrinsic)
+        points = transformPts(points3d, extrinsic)
         return points, points3d
 
 
     def drawPointsAndShow(self, points, xys, image, isFinal=False):
+        """
+        @brief      draw 2D point and show the result image
+        
+        @param      image: the image
+        @param      points: the list of 2D points
+        @param      xys: the list of 2D xy corrdinates
+        @param      isFinal: if show the final result   
+
+        @return     None
+        """
         image_with_points = self.drawPoints(points, xys, image)
         if not isFinal:
             cv2.putText(image_with_points, "Press up/down/left/right to move points; press enter to confirm", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
@@ -134,7 +203,7 @@ class Localizer:
         
         @param      image: the image
         @param      points: the list of 2D points
-        @param      xy: the list of 2D xy corrdinates
+        @param      xys: the list of 2D xy corrdinates
         
         @return     painted image
         """
@@ -153,16 +222,24 @@ class Localizer:
     def testLocalization(self):
         pass
 
-    def computeExtrinsic(self, pts2d, pts3d):
+    def computeExtrinsic(self, pts2d, pts3d, real_origin_coordinates=None):
         """
         @brief      using solvePnP to compute extrinsic matrix from 2D to 3D given points
         
         @param      pts2d  The points in piexls
         @param      pts3d  The points in real world
+        @param      real_origin_coordinates  The origin point coordinates in real world
         
         @return     The 3*4 extrinsic matrix
         """
-        ret, rvect, tvect = cv2.solvePnP(np.array(pts3d).astype(np.float32), np.array(pts2d).astype(np.float32), self.camera.camera_P, None)
+        pts3d = np.array(pts3d).astype(np.float32)
+        pts2d = np.array(pts2d).astype(np.float32)
+
+        if real_origin_coordinates is not None:
+            pts3d[:, 0] += real_origin_coordinates[0] * params["Localizer"]["budger_distance_3d"]
+            pts3d[:, 1] += real_origin_coordinates[1] * params["Localizer"]["budger_distance_3d"]
+
+        ret, rvect, tvect = cv2.solvePnP(pts3d, pts2d, self.camera.camera_P, None)
         if not ret:
             return None
         else:
@@ -177,7 +254,7 @@ class Localizer:
         @param      return_dist       If return the distance
         
         @return     points after filtering 
-        @return     If return_dist == True, return the mean distance
+        @return     If return_dist == True, return the median and mean distance
         """
         def rect_contains(rect, point):
             '''
@@ -280,6 +357,7 @@ class Localizer:
         @param      points   The points in pixels
         @param      dist_2d  The expected average distance in pixels
         @param      dist_3d  The expected average distance in meter
+        @param      doTranspose  If transpose the the x, y coordinates
         
         @return     3D points
         @return     corresponding corrdinates in x, y
@@ -301,10 +379,8 @@ class Localizer:
             pts3d.append(objp)
             xy.append([x, y])
         tmp = [tuple(pt) for pt in pts3d]
+
         assert len(tmp) == len(set(tmp)), "incorrect 3D points found: {}".format(xy)
-        # if len(tmp) != len(set(tmp)):
-        #     print "     -> !!!!incorrect 3D points!!!!"
-        #     print xy
         return np.array(pts3d), np.array(xy)
 
     def convertExtrinsic2Pose(self, extrinsic, inverse=False):
@@ -312,6 +388,7 @@ class Localizer:
         @brief      convert the 3*4 extrinsic matrix to 6-value pose (x, y, z, roll, pitch, yaw)
         
         @param      extrinsic  The 3*4 extrinsic matrix
+        @param      inverse  if inverse the matrix 
         
         @return     [x, y, z, roll, pitch, yaw]
         """
@@ -348,9 +425,11 @@ class Localizer:
         @brief      using the feature points and expected distance to undistort the image using homography
         
         @param      image  The image with perspective distortion
+        @param      doTranspose  if tranpose the x, y values
         
         @return     undistorted image
         @return     homography matrix
+        @return     mean distance
         """
         h, w = image.shape[:2]
         points = self.detector.detect(image)
@@ -366,6 +445,7 @@ class Localizer:
         @brief      iteratively compute the homograpy
         
         @param      image  The image
+        @param      doTranspose  if transpose the x, y coordinates
         
         @return     undistorted image
         @return     homography matrix
@@ -391,12 +471,30 @@ class Localizer:
         @brief      resize the image given ratio
         
         @param      image  The image
-        @param      ratio  The resize ratio
         
         @return     resized image
         """
         h, w = image.shape[:2]
         return cv2.resize(image, (w / params["Localizer"]["resize_ratio"], h / params["Localizer"]["resize_ratio"]))
+
+    def savePoseInXML(self, pose):
+        """
+        Save the final result into yaml and xml files.
+        Params:
+            pose: the list of 6 values. eg: [roll, pitch, yaw, x, y, z]
+        """
+        pose = np.array(pose).tolist()
+        
+        with open(os.path.join(params["Localizer"]["result_Path"], 'CameraPose.xml'), 'w') as outfile:
+            string = inner_contents = '<origin x="{}" y="{}" z="{}" roll="{}" pitch="{}" yaw="{}" />'.format(pose[0],
+                                                                                                             pose[1],
+                                                                                                             pose[2],
+                                                                                                             pose[3],
+                                                                                                             pose[4],
+                                                                                                             pose[5])
+            outfile.write(string)
+            print "Pose: ", string
+        print "Final pose saves in ", os.path.join(params["Localizer"]["result_Path"], "CameraPose.xml")
 
     def testPerspective(self, image=None, max_iteration=params["Localizer"]["max_iteration"]):
         """
@@ -420,10 +518,9 @@ class Localizer:
             cv2.waitKey()
 
 if __name__ == "__main__":
-    # image = cv2.imread("../data/images/budger1.jpg")
     # image = cv2.imread("table1.png")
     localizer = Localizer()
-    print localizer.localize()[0]
+    localizer.localize()
     # localizer.testPerspective()
     while True:
         k = cv2.waitKey()
