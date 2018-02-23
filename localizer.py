@@ -78,7 +78,7 @@ class Localizer:
         else:
             self.ROI = params["Localizer"]["ROI"]
 
-        print self.ROI
+        print "ROI: ", self.ROI
 
         image, H = self.solvePerspectiveDistortaionIteration(image) 
         # 
@@ -107,7 +107,7 @@ class Localizer:
         k = -1
         while k != 13:
             points, points3d = self.movePoints(points3d, k, extrinsic)
-            self.drawPointsAndShow(points, xys, original_image.copy(), isFinal=False)
+            self.drawPointsAndShow(points, xys, original_image.copy(), message=params["Localizer"]["message_moving"])
             k = cv2.waitKey()
         cv2.destroyAllWindows()
 
@@ -117,7 +117,7 @@ class Localizer:
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), H)[0]
         
         cv2.imshow("Original Image", self.resize(image_with_circles))
-        self.drawPointsAndShow(points, xys, image.copy(), isFinal=True)
+        self.drawPointsAndShow(points, xys, image.copy(), message=params["Localizer"]["message_final"])
         
         pose = self.convertExtrinsic2Pose(fianl_extrinsic, inverse=True)
         self.savePoseInXML(pose)
@@ -172,6 +172,11 @@ class Localizer:
             print "Detected key: rotate right"
             M = cv2.getRotationMatrix2D((points3d[0, 0], points3d[0, 1]), -90, 1)
             points3d = applyRotationM(points3d, M)
+        elif key == 57: # num: 9, flip along x and y
+            print "Detected key: flip"
+            tmp = points3d.copy()
+            points3d[:, 0] = tmp[:, 1]
+            points3d[:, 1] = tmp[:, 0]
         else:
             print "   !!!! Unkown key detected"
 
@@ -179,22 +184,20 @@ class Localizer:
         return points, points3d
 
 
-    def drawPointsAndShow(self, points, xys, image, isFinal=False):
+    def drawPointsAndShow(self, points, xys, image, message=None):
         """
         @brief      draw 2D point and show the result image
         
         @param      image: the image
         @param      points: the list of 2D points
         @param      xys: the list of 2D xy corrdinates
-        @param      isFinal: if show the final result   
+        @param      message: the info writing on top of image
 
         @return     None
         """
         image_with_points = self.drawPoints(points, xys, image)
-        if not isFinal:
-            cv2.putText(image_with_points, "Press up/down/left/right to move points; press enter to confirm", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
-        else:
-            cv2.putText(image_with_points, "Final Undistorted Result", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
+        if message is not None:
+            cv2.putText(image_with_points, message, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
         cv2.imshow("Find real origin", self.resize(image_with_points))
 
     def drawPoints(self, points, xys, image):
@@ -215,7 +218,7 @@ class Localizer:
             cv2.circle(image, tuple(np.array(pt).astype(int)), 10, (i * 255 / len(points), 0, 0), -1)
             cv2.putText(image,'(%d, %d)' % (xy[0], xy[1]), (int(pt[0] + 10), int(pt[1] + 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
         center_camera = self.camera.camera_C
-        cv2.circle(image, (int(center_camera[0]), int(center_camera[1])), 10, (i * 255 / len(points), 0, 0), -1)
+        cv2.circle(image, (int(center_camera[0]), int(center_camera[1])), 10, (0, 255, 0), -1)
         return image
 
     # TODO: find a way for testing 
@@ -298,17 +301,40 @@ class Localizer:
                 cv2.line(image_show, pt2, pt3, (0, 255, 0), 1, cv2.LINE_AA, 0)
                 cv2.line(image_show, pt3, pt1, (0, 255, 0), 1, cv2.LINE_AA, 0)
         cv2.imshow("delaunay", self.resize(image_show))
+        cv2.waitKey(10)
 
-        dists = []
-        res = []
-        for pt in points:
-            if not rect_contains(tuple(self.ROI), pt): continue
-            pts = list(set(points_dict[tuple(pt)]))
-            dist = np.linalg.norm(pts - np.array(pt), axis=1)
-            dist_diff = dist % params["Localizer"]["budger_distance_2d"]
-            if (dist_diff < params["Localizer"]["tolerance_2d"]).any():
-                res.append(pt)
-                dists += dist[dist_diff < params["Localizer"]["tolerance_2d"]].tolist()
+        if params["Localizer"]["use_preset_2d_distance"]:
+            dists = []
+            res = []
+            for pt in points:
+                if not rect_contains(tuple(self.ROI), pt): continue
+                pts = list(set(points_dict[tuple(pt)]))
+                dist = np.linalg.norm(pts - np.array(pt), axis=1)
+                dist_diff = dist % params["Localizer"]["budger_distance_2d"]
+                if (dist_diff < params["Localizer"]["tolerance_2d"]).any():
+                    res.append(pt)
+                    dists += dist[dist_diff < params["Localizer"]["tolerance_2d"]].tolist()
+        else:
+            all_dists = []
+            for pt in points:
+                if not rect_contains(tuple(self.ROI), pt): continue
+                pts = list(set(points_dict[tuple(pt)]))
+                dist = np.linalg.norm(pts - np.array(pt), axis=1)
+                all_dists += dist.copy().tolist()
+
+            dist_2d = np.median(all_dists)
+            # print "dist_2d: ", dist_2d # TODO: improve the requirement of origin point (it's possible to make it has no good neighbors)
+
+            dists = []
+            res = []
+            for pt in points:
+                if not rect_contains(tuple(self.ROI), pt): continue
+                pts = list(set(points_dict[tuple(pt)]))
+                dist = np.linalg.norm(pts - np.array(pt), axis=1)
+                dist_diff = dist % dist_2d
+                if (dist_diff < params["Localizer"]["tolerance_2d"]).any():
+                    res.append(pt)
+                    dists += dist[dist_diff < params["Localizer"]["tolerance_2d"]].tolist()
 
         if not return_dist:
             return np.array(res)
@@ -366,7 +392,7 @@ class Localizer:
         origin = points[0]
         objp = [0., 0., 0.]
         pts3d.append(objp)
-        xy = [[0, 0]]
+        xys = [[0, 0]]
 
         for pt in points[1:]:
             if doTranspose:
@@ -377,11 +403,17 @@ class Localizer:
                 y = round((pt[1] - origin[1]) / dist_2d)
             objp = [x * dist_3d, y * dist_3d, 0.]
             pts3d.append(objp)
-            xy.append([x, y])
+            xys.append([x, y])
         tmp = [tuple(pt) for pt in pts3d]
 
-        assert len(tmp) == len(set(tmp)), "incorrect 3D points found: {}".format(xy)
-        return np.array(pts3d), np.array(xy)
+        if len(tmp) != len(set(tmp)):
+            print "incorrect 3D points found %d != %d" % (len(tmp), len(set(tmp))) 
+            image = self.camera.frame_rect
+            self.drawPointsAndShow(points, xys, image.copy(), message="incorrect points plotting")
+            cv2.waitKey()
+
+        assert len(tmp) == len(set(tmp)), "incorrect 3D points found: {}".format(xys)
+        return np.array(pts3d), np.array(xys)
 
     def convertExtrinsic2Pose(self, extrinsic, inverse=False):
         """
@@ -435,7 +467,7 @@ class Localizer:
         points = self.detector.detect(image)
         points, mid_dist, mean_dist = self.filterPoints2D(image, points, return_dist=True)
         points = self.sortPotins2D(points, dist=mid_dist)
-        pts3d, _ = self.matchPoints2Dwith3D(points, dist_2d=mean_dist, dist_3d=mean_dist, doTranspose=doTranspose)
+        pts3d, _ = self.matchPoints2Dwith3D(points, dist_2d=mid_dist, dist_3d=mid_dist, doTranspose=doTranspose)
         pts3d[:, :2] += points[0]
         H, status = cv2.findHomography(np.array(points), pts3d[..., :2])
         return cv2.warpPerspective(image, H, (w, h)), H, mean_dist
