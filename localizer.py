@@ -8,6 +8,7 @@ from subprocess import call
 
 from blob_detector import Detector
 from camera import Camera 
+from fiducialDetector import FiducialDetector
 
 params_file = open("budger_localizer_params.yaml", "r")
 params = yaml.load(params_file)
@@ -17,10 +18,12 @@ call(["mkdir", "-p", params["Localizer"]["result_Path"]])
 class Localizer:
     def __init__(self):
         self.detector = Detector()
+        self.fiducial_detector = FiducialDetector()
         self.camera = Camera()
         self.camera.enable() # starting camera node
         self.ROI = []
         self.image = None
+        self.extrinsic = None
 
     def ROI_by_mouse(self, event, x, y, flags, param):
         # if the left mouse button was clicked, record the starting
@@ -115,12 +118,19 @@ class Localizer:
         
         fianl_extrinsic = self.computeExtrinsic(points, points3d_original, real_origin_coordinates)
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), H)[0]
+        self.extrinsic = fianl_extrinsic.copy()
         
         cv2.imshow("Original Image", self.resize(image_with_circles))
         self.drawPointsAndShow(points, xys, image.copy(), message=params["Localizer"]["message_final"])
         
         pose = self.convertExtrinsic2Pose(fianl_extrinsic, inverse=True)
         self.savePoseInXML(pose)
+        
+        while True:
+            k = cv2.waitKey()
+            if k == 27: # press esc to quit
+                break
+
         return pose, fianl_extrinsic
 
     def movePoints(self, points3d, key, extrinsic):
@@ -221,9 +231,119 @@ class Localizer:
         cv2.circle(image, (int(center_camera[0]), int(center_camera[1])), 10, (0, 255, 0), -1)
         return image
 
-    # TODO: find a way for testing 
-    def testLocalization(self):
-        pass
+    def backProjection(self, pt2d, extrinsic, zHeight):
+        """
+        @brief      compute back-projection from 2D to 3D, given z (height of fiducial) 
+                    a: | m11   m12   -x2d | b:     | m13 * height + tx |    
+                       | m21   m22   -y2d |   -1 * | m23 * height + ty |    
+                       | m31   m32   -1   |        | m33 * height + tz |        
+        @param      pt2d  The point in 2D
+        @return     pt3d  The point in 3D
+        """
+        projectionM = self.camera.camera_P.dot(extrinsic)
+        a = np.zeros([3, 3], np.float64)
+        a[:3, :2] = projectionM[:, :2]
+        a[0, 2] = -1 * pt2d[0]
+        a[1, 2] = -1 * pt2d[1]
+        a[2, 2] = -1
+        b = np.zeros([3, 1], np.float64)
+        b[:, 0] = -1 * (projectionM[:, 2] * (-1) * zHeight + projectionM[:, 3])
+        result = np.squeeze(np.linalg.solve(a, b))
+        pt3d = [result[0], result[1], -1 * zHeight]
+
+        return np.array(pt3d)
+
+
+    def getModelSamplePoints(self, center, radius, nSample=100):
+        """
+        Sample the points from the circle model.
+        Params: 
+            center: center point
+            radius: radius of the circle model. Unit: meter
+            nSample: number of samples (this value can affect the percision of ICP)
+        Return:
+            array([[p0x, p0y], [p1x, p1y], ...])
+        """
+        sampleAngles = np.linspace(0, 2*np.pi, nSample).astype(np.float64)
+        model = []
+        for a in sampleAngles:
+            pt = np.array([np.cos(a), np.sin(a)]) * radius + np.array(center[:2]).astype(np.float64)
+            model.append(pt.tolist() + [center[2]])
+        return np.array(model)
+
+    def testLocalization(self, image_input=None, extrinsic=None):
+        """
+        @brief      test the localization accuracy based on the Aruco test
+        
+        @param      image_input: the distorted image
+        @param      extrinsic: the 3*4 extriansic matrix from table to camera
+        
+        @return     None
+        """
+        def transformPts(points3d, extrinsic):
+            points = []
+            for pt3d in points3d:
+                pt3d = pt3d.tolist()
+                pt3d.append(1)
+                pt = self.camera.camera_P.dot(extrinsic.dot(np.reshape(pt3d, [4, 1]))).flatten()
+                pt = pt[:2] / pt[2]
+                points.append(pt)
+            return points
+
+        if image_input is None:
+            image = self.camera.frame_rect
+        else:
+            image = image_input.copy()
+        if self.extrinsic is not None:
+            extrinsic = self.extrinsic.copy()
+        assert image is not None
+        assert extrinsic is not None
+
+        while True:
+            if image_input is None:
+                image = self.camera.frame_rect
+            else:
+                image = image_input.copy()
+
+            ret, fiducial_center = self.fiducial_detector.detectFiducial(image)
+            if not ret:
+                print "Fail to detect fiducial"
+            else:
+                cv2.circle(image, tuple(fiducial_center.astype(int)), 10, (255, 0, 255), -1)
+                fiducial_center_3d = self.backProjection(fiducial_center, 
+                                                         extrinsic, 
+                                                         zHeight=params["FiducialDetector"]["fiducial_height"])
+                print "Fiducial Center Location: {}".format(fiducial_center_3d)
+                model_pts3d = self.getModelSamplePoints(fiducial_center_3d, radius=params["FiducialDetector"]["circle_radius"])
+                model_pts2d = transformPts(model_pts3d, extrinsic)
+                for pt2d in model_pts2d:
+                    cv2.circle(image, tuple(np.array(pt2d).astype(int)), 2, (0, 255, 0), -1)
+
+                cv2.imshow("Test Result", self.resize(image))
+                k = cv2.waitKey(10)
+                if k == 27:
+                    break
+
+    def testFiducialDetection(self, image=None):
+        """
+        @brief      test the fiducial detector
+        
+        @param      image: the distorted image
+        
+        @return     None
+        """
+        if image is None:
+            image = self.camera.frame_rect
+
+        print "detecting... "
+        ret, fiducial_center = self.fiducial_detector.detectFiducial(image, testMode=True)
+        if not ret:
+            print "Fail to detect fiducial! "
+        else:
+            print "Detect fiducial successful! "
+            cv2.circle(image, tuple(fiducial_center.astype(int)), 10, (255, 0, 255), -1)
+            cv2.imshow("Detection Result", self.resize(image))
+            cv2.waitKey()
 
     def computeExtrinsic(self, pts2d, pts3d, real_origin_coordinates=None):
         """
@@ -323,7 +443,6 @@ class Localizer:
                 all_dists += dist.copy().tolist()
 
             dist_2d = np.median(all_dists)
-            # print "dist_2d: ", dist_2d # TODO: improve the requirement of origin point (it's possible to make it has no good neighbors)
 
             dists = []
             res = []
@@ -549,12 +668,14 @@ class Localizer:
             cv2.imshow("blub detection", self.resize(image_with_circles))
             cv2.waitKey()
 
+extrinsic = np.array([[ 0.99997345,  0.00602243, -0.00410289, -0.1604342 ],
+ [-0.00597383,  0.99991304,  0.01175732, -0.32755519],
+ [ 0.00417335, -0.01173249,  0.99992246,  1.14454347]], np.float32)
+
 if __name__ == "__main__":
     # image = cv2.imread("table1.png")
     localizer = Localizer()
-    localizer.localize()
-    # localizer.testPerspective()
-    while True:
-        k = cv2.waitKey()
-        if k == 27:
-            break
+    # localizer.localize()
+    print "extrinsic: \n", localizer.extrinsic
+    localizer.testLocalization(extrinsic=extrinsic)
+    # localizer.testFiducialDetection()

@@ -1,43 +1,48 @@
 blob_detector:
   # Change thresholds
-  minThreshold: 10
-  maxThreshold: 250
+  minThreshold                        : 10
+  maxThreshold                        : 250
 
   # Filter by Area.
-  filterByArea: True
-  minArea: 400 # protolowry 400, budger 500
-  maxArea: 810 # protolowry 810, budger 810
+  filterByArea                        : True
+  minArea                             : 400 # protolowry 400, budger 500
+  maxArea                             : 810 # protolowry 810, budger 810
 
   # Filter by Circularity
-  filterByCircularity: False
-  minCircularity: 0.1
+  filterByCircularity                 : False
+  minCircularity                      : 0.1
    
   # Filter by Convexity
-  filterByConvexity: False
-  minConvexity: 0.87
+  filterByConvexity                   : False
+  minConvexity                        : 0.87
    
   # Filter by Inertia
-  filterByInertia: False
-  minInertiaRatio: 0.01
+  filterByInertia                     : False
+  minInertiaRatio                     : 0.01
 
 Camera:
-  topic_rect: /overhead/image_rect
-  topic_info: /overhead/camera_info
-  topic_ueye: /ueye_cam_nodelet
+  topic_rect                          : /overhead/image_rect
+  topic_info                          : /overhead/camera_info
+  topic_ueye                          : /ueye_cam_nodelet
+
+FiducialDetector:
+  arucoID                             : 0
+  fiducial_height                     : 0.00509
+  circle_radius                       : 0.06945
 
 Localizer:
-  result_Path: camera_localization_results
-  use_preset_2d_distance: False
-  budger_distance_3d: 0.15108 # unit: meter protolowry 0.15108, budger 0.3048
-  budger_distance_2d: 250.0 # unit: pixel protolowry 250.0, budger 170
-  tolerance_3d: 0.001 
-  tolerance_2d: 40.0 
-  max_iteration: 10
-  min_difference_xyz: 0.005 # unit: meter protolowry 0.005 TODO: refine the result using this parameter  
-  min_difference_rpy: 0.01 # unit: radian  protolowry 0.01 TODO: refine the result using this parameter
-  use_mouse_select: True
-  ROI: [1150, 1100, 1576, 1738] # a selected region of budgers protolowry [1150, 1100, 1576, 1738] 
-  resize_ratio: 2
-  real_origin_coordinates: [0, 0] # overhead 2: 7, 2
-  message_moving: Press up/down/left/right/rotate_left(#7)/rotate_right(#8)/flip(#9) to move points; press enter to confirm
-  message_final: Final Undistorted Result
+  result_Path                         : camera_localization_results
+  use_preset_2d_distance              : False
+  budger_distance_3d                  : 0.15108 # unit: meter protolowry 0.15108, budger 0.3048
+  budger_distance_2d                  : 250.0 # unit: pixel protolowry 250.0, budger 170
+  tolerance_3d                        : 0.001 
+  tolerance_2d                        : 40.0 
+  max_iteration                       : 10
+  min_difference_xyz                  : 0.005 # unit: meter protolowry 0.005 TODO: refine the result using this parameter  
+  min_difference_rpy                  : 0.01 # unit: radian  protolowry 0.01 TODO: refine the result using this parameter
+  use_mouse_select                    : True
+  ROI                                 : [1150, 1100, 1576, 1738] # a selected region of budgers protolowry [1150, 1100, 1576, 1738] 
+  resize_ratio                        : 2
+  real_origin_coordinates             : [0, 0] # overhead 2: 7, 2
+  message_moving                      : Press up/down/left/right/rotate_left(#7)/rotate_right(#8)/flip(#9) to move points; press enter to confirm
+  message_final                       : Final Undistorted Result
