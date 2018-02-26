@@ -17,6 +17,7 @@ class Detector:
 		self.params = cv2.SimpleBlobDetector_Params()
 		self.detector = self.create_detector()
 		self.keypoints = None
+		self.centers = None
 
 	def create_detector(self):
 		"""
@@ -72,6 +73,7 @@ class Detector:
 		for keypoint in keypoints:
 			centers.append(list(np.array(keypoint.pt).astype(int)))
 		self.keypoints = keypoints
+		self.centers = np.array(centers)
 
 		return np.array(centers)
 
@@ -101,6 +103,11 @@ class Detector:
 
 		# detect keypoints
 		self.keypoints = self.detector.detect(image)
+		centers = []
+		for keypoint in self.keypoints:
+			centers.append(list(np.array(keypoint.pt).astype(int)))
+		self.centers = centers
+		
 		# cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS ensures the size of the circle corresponds to the size of blob
 		return cv2.drawKeypoints(image, self.keypoints, np.array([]), color, cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 

@@ -1,10 +1,12 @@
 import os
 import cv2
 import copy
+import time 
 import yaml
 import numpy as np 
 from tf import transformations
 from subprocess import call 
+import lxml.etree as ET
 
 from blob_detector import Detector
 from camera import Camera 
@@ -21,16 +23,35 @@ class Localizer:
         self.fiducial_detector = FiducialDetector()
         self.camera = Camera()
         self.camera.enable() # starting camera node
-        self.ROI = []
+        self.init_pts = {}
         self.image = None
         self.extrinsic = None
+        self.model = self.getModelFromFile()
 
-    def ROI_by_mouse(self, event, x, y, flags, param):
+    def getModelFromFile(self):
+        model = {}
+        tree = ET.parse(params["Localizer"]["model_file"])
+        root = tree.getroot()
+        for elem in root:  
+            tmp = elem.attrib
+            ID = tuple([int(s) for s in tmp["ID"][1:-1].split(",")])
+            coordinates =  tuple([float(s) for s in tmp["Coordinates"][1:-1].split(",")])
+            model[ID] = coordinates
+        return model
+
+    def select_by_mouse(self, event, x, y, flags, param):
         # if the left mouse button was clicked, record the starting
         # (x, y) coordinates and indicate that cropping is being
         # performed
+        def find_detected_point(x, y):
+            x *= params["Localizer"]["resize_ratio"]
+            y *= params["Localizer"]["resize_ratio"]
+            dists = np.linalg.norm(self.detector.centers - np.array([x, y]), axis=1)
+            min_idx = np.argmin(dists)
+            return tuple(self.detector.centers[min_idx])
+
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.ROI += [x, y]
+            self.init_pts[find_detected_point(x, y)] = None
 
     def getRealOriginCoordinates(self):
         """
@@ -56,6 +77,41 @@ class Localizer:
                 print "Input is not a valid format. Should be: x, y"
         return real_origin_coordinates
 
+    def getInitPtsPairs(self, image_with_circles):
+        """
+        @brief      manually selected a number of detected-real world point pair
+                
+        @param      image_with_circles: the original image with circle marks
+        """
+        while params["Localizer"]["num_initial_points"] > len(self.init_pts):
+            cv2.imshow("Select points for computing initial points", self.resize(image_with_circles))
+            cv2.setMouseCallback("Select points for computing initial points", self.select_by_mouse)
+
+            prev_num_init_pts = len(self.init_pts)
+            while len(self.init_pts) == prev_num_init_pts:
+                cv2.waitKey(1)
+
+            cv2.destroyWindow("Select points for computing initial points")
+
+            real_origin_coordinates = None
+            while real_origin_coordinates is None:
+                tmp = raw_input("Please input the model relative coordinates (x, y): ")
+                try:
+                    tmp = [int(ss) for ss in tmp.split(",")]
+                except ValueError:
+                    print "Input is not a valid format. Should be: x, y"
+                    continue
+                if len(tmp) == 2:
+                    real_origin_coordinates = tmp
+                else:
+                    print "Input is not a valid format. Should be: x, y"
+            
+            for key, item in self.init_pts.items():
+                if item is None:
+                    self.init_pts[key] = self.model[tuple(real_origin_coordinates)]
+                    break
+
+
     def localize(self, image=None):
         """
         @brief      Localizing table given undistorted image (using solvePerspectiveDistortaion
@@ -65,51 +121,51 @@ class Localizer:
         @return     pose: [x, y, z, roll, pitch, yaw]
         @return     extrinsic: a 3*4 ndarray 
         """
+        def clip_angle(angle):
+            return abs(angle) % 1.57
+
         if image is None:
             image = self.camera.frame_rect
         original_image = image.copy()
 
-        # obtain ROI
-        if params["Localizer"]["use_mouse_select"]:
-            image_with_circles = self.detector.detectAndDrawKeypoints(image.copy())
-            cv2.imshow("Select ROI by click top-left and button-right points", self.resize(image_with_circles))
-            cv2.setMouseCallback("Select ROI by click top-left and button-right points", self.ROI_by_mouse)
-            while len(self.ROI) < 4:
-                cv2.waitKey(1)
-            cv2.destroyWindow("Select ROI by click top-left and button-right points")
-            self.ROI = (np.array(self.ROI) * params["Localizer"]["resize_ratio"]).tolist()
+        # initial detection
+        image_with_circles = self.detector.detectAndDrawKeypoints(image.copy())
+
+        # manually select pairs of points and compute the initial pose
+        self.getInitPtsPairs(image_with_circles)
+        points = np.array(self.init_pts.keys())
+        points3d = np.array(self.init_pts.values())
+        init_extrinsic = self.computeExtrinsic(points, points3d)
+        init_pose = self.convertExtrinsic2Pose(init_extrinsic, inverse=True)
+        if clip_angle(init_pose[-1]) > 0.1:
+            xyAline = False
         else:
-            self.ROI = params["Localizer"]["ROI"]
+            xyAline = True
 
-        print "ROI: ", self.ROI
+        # use the initial pose for homography undistortion
+        image, H = self.solvePerspectiveDistortaion(image, init_extrinsic) 
 
-        image, H = self.solvePerspectiveDistortaionIteration(image) 
-        # 
-        # Note: use the undistorted image to find the circle centers, and 
-        # convert the points back to the original image space; use these
-        # points to further compute solvePnP
-        # 
-
+        # use the undistorted image to detect budger
         points = self.detector.detect(image)
         image_with_circles = self.detector.drawKeypoints(image.copy())
 
-        points, dist_2d, _ = self.filterPoints2D(image, points, return_dist=True)
-        points = self.sortPotins2D(points, dist_2d)
+        # project the points back to original image
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), np.linalg.inv(H))[0]
          
-        points3d, xys = self.matchPoints2Dwith3D(points, dist_2d=dist_2d, 
-                                         dist_3d=params["Localizer"]["budger_distance_3d"], 
-                                         doTranspose=True)
+        points2d, points3d, xys = self.matchPoints2Dwith3D(points, init_extrinsic)
 
-        extrinsic = self.computeExtrinsic(points, points3d)
+        extrinsic = self.computeExtrinsic(points2d, points3d)
         points3d_original = points3d.copy()
-
+        origin_pt3d = sorted(xys, key = lambda x: (x[0], x[1]))[0]
+        for idx, pt3d in enumerate(xys):
+            if (origin_pt3d == pt3d).all():
+                origin_pt3d_idx = idx
         
         cv2.imshow("Original Image", self.resize(image_with_circles))
 
         k = -1
         while k != 13:
-            points, points3d = self.movePoints(points3d, k, extrinsic)
+            points, points3d = self.movePoints(points3d, k, extrinsic, xyAline, origin_pt3d_idx)
             self.drawPointsAndShow(points, xys, original_image.copy(), message=params["Localizer"]["message_moving"])
             k = cv2.waitKey()
         cv2.destroyAllWindows()
@@ -133,7 +189,7 @@ class Localizer:
 
         return pose, fianl_extrinsic
 
-    def movePoints(self, points3d, key, extrinsic):
+    def movePoints(self, points3d, key, extrinsic, xyAline, origin_pt3d_idx):
         """
         @brief      Move the 3D points given the keyboard command
         
@@ -161,26 +217,45 @@ class Localizer:
             return points
 
         points3d = np.array(points3d).copy()
+        origin_pt3d = points3d[origin_pt3d_idx]
 
         if key == 82: # up
             print "Detected key: up"
-            points3d[:, 0] -= params["Localizer"]["budger_distance_3d"]
+            if not xyAline:
+                points3d[:, 0] -= params["Localizer"]["budger_distance_3d"]
+            else:
+                points3d[:, 1] -= params["Localizer"]["budger_distance_3d"]
         elif key == 84: # down
             print "Detected key: down"
-            points3d[:, 0] += params["Localizer"]["budger_distance_3d"]
+            if not xyAline:
+                points3d[:, 0] += params["Localizer"]["budger_distance_3d"]
+            else:
+                points3d[:, 1] += params["Localizer"]["budger_distance_3d"]
         elif key == 81: # left
             print "Detected key: left"
-            points3d[:, 1] -= params["Localizer"]["budger_distance_3d"]
+            if not xyAline:
+                points3d[:, 1] -= params["Localizer"]["budger_distance_3d"]
+            else:
+                points3d[:, 0] -= params["Localizer"]["budger_distance_3d"]
         elif key == 83: # right
             print "Detected key: right"
-            points3d[:, 1] += params["Localizer"]["budger_distance_3d"]
+            if not xyAline:
+                points3d[:, 1] += params["Localizer"]["budger_distance_3d"]
+            else:
+                points3d[:, 0] += params["Localizer"]["budger_distance_3d"]
         elif key == 55: # num: 7, left rotation
             print "Detected key: rotate left"
-            M = cv2.getRotationMatrix2D((points3d[0, 0], points3d[0, 1]), 90, 1)
+            if not xyAline:
+                M = cv2.getRotationMatrix2D((origin_pt3d[0], origin_pt3d[1]), 90, 1)
+            else:
+                M = cv2.getRotationMatrix2D((origin_pt3d[0], origin_pt3d[1]), -90, 1)
             points3d = applyRotationM(points3d, M)
         elif key == 56: # num: 8, right rotation
             print "Detected key: rotate right"
-            M = cv2.getRotationMatrix2D((points3d[0, 0], points3d[0, 1]), -90, 1)
+            if not xyAline:
+                M = cv2.getRotationMatrix2D((origin_pt3d[0], origin_pt3d[1]), -90, 1)
+            else:
+                M = cv2.getRotationMatrix2D((origin_pt3d[0], origin_pt3d[1]), 90, 1)
             points3d = applyRotationM(points3d, M)
         elif key == 57: # num: 9, flip along x and y
             print "Detected key: flip"
@@ -225,7 +300,7 @@ class Localizer:
         if len(image.shape) == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2COLOR)
         for i, (pt, xy) in enumerate(zip(points, xys)):
-            cv2.circle(image, tuple(np.array(pt).astype(int)), 10, (i * 255 / len(points), 0, 0), -1)
+            cv2.circle(image, tuple(np.array(pt).astype(int)), 10, (255, 0, 0), -1)
             cv2.putText(image,'(%d, %d)' % (xy[0], xy[1]), (int(pt[0] + 10), int(pt[1] + 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
         center_camera = self.camera.camera_C
         cv2.circle(image, (int(center_camera[0]), int(center_camera[1])), 10, (0, 255, 0), -1)
@@ -368,98 +443,6 @@ class Localizer:
         else:
             return self.convertvects2Extrinsic(tvect, rvect)
 
-    def filterPoints2D(self, image, points, return_dist=False):
-        """
-        @brief      filter the 2D points based on the rough expected distance 
-        
-        @param      image             The image
-        @param      points            The points in pixels
-        @param      return_dist       If return the distance
-        
-        @return     points after filtering 
-        @return     If return_dist == True, return the median and mean distance
-        """
-        def rect_contains(rect, point):
-            '''
-            Check if a point is inside the image
-
-            Input: the size of the image 
-                   the point that want to test
-
-            Output: if the point is inside the image
-
-            '''
-            if point[0] < rect[0] :
-                return False
-            elif point[1] < rect[1] :
-                return False
-            elif point[0] > rect[2] :
-                return False
-            elif point[1] > rect[3] :
-                return False
-            return True
-
-        points_dict = {}
-        size = image.shape
-        rect = (0, 0, size[1], size[0])
-        subdiv  = cv2.Subdiv2D(rect)
-        image_show = image.copy()
-        for pt in points:
-            if not rect_contains(tuple(self.ROI), pt): continue
-            subdiv.insert(tuple(pt))
-            points_dict[tuple(pt)] = []
-
-        for t in subdiv.getTriangleList()[1:]: 
-            pt1 = (int(t[0]), int(t[1]))
-            pt2 = (int(t[2]), int(t[3]))
-            pt3 = (int(t[4]), int(t[5]))
-            if rect_contains(rect, pt1) and rect_contains(rect, pt2) and rect_contains(rect, pt3):
-                points_dict[pt1] += [pt2, pt3]
-                points_dict[pt2] += [pt1, pt3]
-                points_dict[pt3] += [pt1, pt2]
-                cv2.line(image_show, pt1, pt2, (0, 255, 0), 1, cv2.LINE_AA, 0)
-                cv2.line(image_show, pt2, pt3, (0, 255, 0), 1, cv2.LINE_AA, 0)
-                cv2.line(image_show, pt3, pt1, (0, 255, 0), 1, cv2.LINE_AA, 0)
-        cv2.imshow("delaunay", self.resize(image_show))
-        cv2.waitKey(10)
-
-        if params["Localizer"]["use_preset_2d_distance"]:
-            dists = []
-            res = []
-            for pt in points:
-                if not rect_contains(tuple(self.ROI), pt): continue
-                pts = list(set(points_dict[tuple(pt)]))
-                dist = np.linalg.norm(pts - np.array(pt), axis=1)
-                dist_diff = dist % params["Localizer"]["budger_distance_2d"]
-                if (dist_diff < params["Localizer"]["tolerance_2d"]).any():
-                    res.append(pt)
-                    dists += dist[dist_diff < params["Localizer"]["tolerance_2d"]].tolist()
-        else:
-            all_dists = []
-            for pt in points:
-                if not rect_contains(tuple(self.ROI), pt): continue
-                pts = list(set(points_dict[tuple(pt)]))
-                dist = np.linalg.norm(pts - np.array(pt), axis=1)
-                all_dists += dist.copy().tolist()
-
-            dist_2d = np.median(all_dists)
-
-            dists = []
-            res = []
-            for pt in points:
-                if not rect_contains(tuple(self.ROI), pt): continue
-                pts = list(set(points_dict[tuple(pt)]))
-                dist = np.linalg.norm(pts - np.array(pt), axis=1)
-                dist_diff = dist % dist_2d
-                if (dist_diff < params["Localizer"]["tolerance_2d"]).any():
-                    res.append(pt)
-                    dists += dist[dist_diff < params["Localizer"]["tolerance_2d"]].tolist()
-
-        if not return_dist:
-            return np.array(res)
-        else:
-            return np.array(res), np.median(dists), np.mean(dists)
-
     def distanc2D(self, pt1, pt2, axis=None):
         """
         @brief      compute the distance of 2D points
@@ -475,64 +458,31 @@ class Localizer:
         else:
             return np.linalg.norm(np.array(pt1[axis]) - np.array(pt2[axis]))
 
-    def sortPotins2D(self, points, dist):
-        """
-        @brief      sort the 2D points based on the top-left point of their bounding box
-        
-        @param      points  The points in pixels
-        @param      dist    The expected average distance between each point
-        
-        @return     sorted points
-        """
-        def getBbox(points):
-            points = np.array(points)
-            minx, miny, maxx, maxy = np.min(points[:, 0]), np.min(points[:, 1]), np.max(points[:, 0]), np.max(points[:, 1])
-            return np.array([minx, miny, maxx-minx, maxy-miny])
-
-        bbox = getBbox(points)
-        dists = np.linalg.norm(points - bbox[:2], axis=1)
-        origin = points[np.argmin(dists)]
-        return sorted(points, key = lambda pt: (round(self.distanc2D(origin, pt, axis=1) / dist), 
-                                                round(self.distanc2D(origin, pt, axis=0) / dist)))
-
-    def matchPoints2Dwith3D(self, points, dist_2d, dist_3d, doTranspose):
+    def matchPoints2Dwith3D(self, points, init_extrinsic):
         """
         @brief      given a list of sorted 2D points, compute their corresponding 3D points
         
-        @param      points   The points in pixels
-        @param      dist_2d  The expected average distance in pixels
-        @param      dist_3d  The expected average distance in meter
-        @param      doTranspose  If transpose the the x, y coordinates
+        @param      points          The points in pixels
+        @param      init_extrinsic  the initial extransic matrix 
         
+        @return     2D points
         @return     3D points
         @return     corresponding corrdinates in x, y
         """
-        pts3d = []
-        origin = points[0]
-        objp = [0., 0., 0.]
-        pts3d.append(objp)
-        xys = [[0, 0]]
+        pts3d, xys, pts2d = [], [], []
+        model_pts_values = np.array(self.model.values())
+        model_pts_keys = np.array(self.model.keys())
+        for pt in points:
+            tmp_pt3d = self.backProjection(pt, init_extrinsic, zHeight=params["Localizer"]["budger_height"])
+            dists = np.linalg.norm(model_pts_values - tmp_pt3d, axis=1)
+            min_idx = np.argmin(dists)
+            min_dist = dists[min_idx]
+            if min_dist < params["Localizer"]["tolerance_3d"]: 
+                pts2d.append(pt)
+                pts3d.append(model_pts_values[min_idx])
+                xys.append(model_pts_keys[min_idx])
 
-        for pt in points[1:]:
-            if doTranspose:
-                y = round((pt[0] - origin[0]) / dist_2d)
-                x = round((pt[1] - origin[1]) / dist_2d)
-            else:
-                x = round((pt[0] - origin[0]) / dist_2d)
-                y = round((pt[1] - origin[1]) / dist_2d)
-            objp = [x * dist_3d, y * dist_3d, 0.]
-            pts3d.append(objp)
-            xys.append([x, y])
-        tmp = [tuple(pt) for pt in pts3d]
-
-        if len(tmp) != len(set(tmp)):
-            print "incorrect 3D points found %d != %d" % (len(tmp), len(set(tmp))) 
-            image = self.camera.frame_rect
-            self.drawPointsAndShow(points, xys, image.copy(), message="incorrect points plotting")
-            cv2.waitKey()
-
-        assert len(tmp) == len(set(tmp)), "incorrect 3D points found: {}".format(xys)
-        return np.array(pts3d), np.array(xys)
+        return np.array(pts2d), np.array(pts3d), np.array(xys)
 
     def convertExtrinsic2Pose(self, extrinsic, inverse=False):
         """
@@ -571,51 +521,65 @@ class Localizer:
         ExCamera2Table[:, 3] = translationM
         return ExCamera2Table
 
-    def solvePerspectiveDistortaion(self, image, doTranspose=False):
+    def projectionPts3D(self, pts3d, extrinsic):
+        """
+        @brief      using the feature points and expected distance to undistort the image using homography
+        
+        @param      pts3d  the list of 3D points, [[x, y, z], [x, y, z], ...]
+        @param      extrinsic  the extrinsic matrix 
+        
+        @return     pts3d  the list of 2D points, [[x, y], [x, y], ...]
+        """
+        pts2d = []
+        for pt in pts3d:
+            pt = pt.tolist()
+            pt.append(1)
+            tmp = self.camera.camera_P.dot(extrinsic.dot(np.array(pt).reshape([4, 1])))
+            pts2d.append(tmp.flatten())
+        return np.array(pts2d) 
+
+    def solvePerspectiveDistortaion(self, image, init_extrinsic):
         """
         @brief      using the feature points and expected distance to undistort the image using homography
         
         @param      image  The image with perspective distortion
-        @param      doTranspose  if tranpose the x, y values
+        @param      init_extrinsic  The initial extrinsic matrix 
         
         @return     undistorted image
         @return     homography matrix
-        @return     mean distance
         """
         h, w = image.shape[:2]
         points = self.detector.detect(image)
-        points, mid_dist, mean_dist = self.filterPoints2D(image, points, return_dist=True)
-        points = self.sortPotins2D(points, dist=mid_dist)
-        pts3d, _ = self.matchPoints2Dwith3D(points, dist_2d=mid_dist, dist_3d=mid_dist, doTranspose=doTranspose)
-        pts3d[:, :2] += points[0]
-        H, status = cv2.findHomography(np.array(points), pts3d[..., :2])
-        return cv2.warpPerspective(image, H, (w, h)), H, mean_dist
+        points2d, points3d, xys = self.matchPoints2Dwith3D(points, init_extrinsic)
+        points2d_model = self.projectionPts3D(points3d, init_extrinsic)
+        H, status = cv2.findHomography(points2d, points2d_model)
+        return cv2.warpPerspective(image, H, (w, h)), H
 
-    def solvePerspectiveDistortaionIteration(self, image, doTranspose=False):
-        """
-        @brief      iteratively compute the homograpy
+    # def solvePerspectiveDistortaionIteration(self, image, doTranspose=False):
+    #     """
+    #     @brief      iteratively compute the homograpy
         
-        @param      image  The image
-        @param      doTranspose  if transpose the x, y coordinates
+    #     @param      image  The image
+    #     @param      doTranspose  if transpose the x, y coordinates
         
-        @return     undistorted image
-        @return     homography matrix
-        """
-        if image is None:
-            image = self.camera.frame_rect
+    #     @return     undistorted image
+    #     @return     homography matrix
+    #     """
+    #     if image is None:
+    #         image = self.camera.frame_rect
 
-        prev_mean_dist = None
-        H = np.identity(3, np.float32)
-        for i in range(params["Localizer"]["max_iteration"]):
-            image, currH, mean_dist = self.solvePerspectiveDistortaion(image, doTranspose=doTranspose)
-            H = H.dot(currH)
-            if prev_mean_dist is None:
-                prev_mean_dist = mean_dist
-            else:
-                if abs(prev_mean_dist - mean_dist) < 1:
-                    return image, H
-        print "Reach the maximum iteration! Current difference of mean distance is %f" % abs(prev_mean_dist - mean_dist)
-        return image, H
+    #     prev_mean_dist = None
+    #     H = np.identity(3, np.float32)
+    #     for i in range(params["Localizer"]["max_iteration"]):
+    #         image, currH = self.solvePerspectiveDistortaion(image, doTranspose=doTranspose)
+    #         H = H.dot(currH)
+    #         if prev_mean_dist is None:
+    #             prev_mean_dist = mean_dist
+    #         else:
+    #             if abs(prev_mean_dist - mean_dist) < 1:
+    #                 return image, H
+    #     print "Reach the maximum iteration! Current difference of mean distance is %f" % abs(prev_mean_dist - mean_dist)
+    #     return image, H
 
     def resize(self, image):
         """
@@ -647,27 +611,6 @@ class Localizer:
             print "Pose: ", string
         print "Final pose saves in ", os.path.join(params["Localizer"]["result_Path"], "CameraPose.xml")
 
-    def testPerspective(self, image=None, max_iteration=params["Localizer"]["max_iteration"]):
-        """
-        @brief      test the solvePerspectiveDistortaion method 
-        
-        @param      image          The image with perspective distortion
-        @param      max_iteration  The maximum number of iteration
-        
-        @return     None
-        """
-        if image is None:
-            image = self.camera.frame_rect
-
-        original_image = image.copy()
-        cv2.imshow("original", self.resize(original_image))
-        for i in range(max_iteration):
-            image, _ = self.solvePerspectiveDistortaion(image)
-            cv2.imshow("result", self.resize(image))
-            image_with_circles = self.detector.detectAndDrawKeypoints(image)
-            cv2.imshow("blub detection", self.resize(image_with_circles))
-            cv2.waitKey()
-
 extrinsic = np.array([[ 0.99997345,  0.00602243, -0.00410289, -0.1604342 ],
  [-0.00597383,  0.99991304,  0.01175732, -0.32755519],
  [ 0.00417335, -0.01173249,  0.99992246,  1.14454347]], np.float32)
@@ -675,7 +618,7 @@ extrinsic = np.array([[ 0.99997345,  0.00602243, -0.00410289, -0.1604342 ],
 if __name__ == "__main__":
     # image = cv2.imread("table1.png")
     localizer = Localizer()
-    # localizer.localize()
+    localizer.localize()
     print "extrinsic: \n", localizer.extrinsic
-    localizer.testLocalization(extrinsic=extrinsic)
+    # localizer.testLocalization(extrinsic=extrinsic)
     # localizer.testFiducialDetection()

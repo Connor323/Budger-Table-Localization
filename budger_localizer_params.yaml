@@ -33,9 +33,13 @@ FiducialDetector:
 Localizer:
   result_Path                         : camera_localization_results
   use_preset_2d_distance              : False
+  model_file                          : model.xml
+  budger_shape                        : [16, 12]
   budger_distance_3d                  : 0.15108 # unit: meter protolowry 0.15108, budger 0.3048
+  budger_height                       : 0.0
   budger_distance_2d                  : 250.0 # unit: pixel protolowry 250.0, budger 170
-  tolerance_3d                        : 0.001 
+  num_initial_points                  : 4
+  tolerance_3d                        : 0.05 
   tolerance_2d                        : 40.0 
   max_iteration                       : 10
   min_difference_xyz                  : 0.005 # unit: meter protolowry 0.005 TODO: refine the result using this parameter  
