@@ -23,13 +23,13 @@ class Localizer:
         self.fiducial_detector = FiducialDetector()
         self.camera = Camera()
         self.camera.enable() # starting camera node
-        self.init_pts = {}
+        self.init_pts = {} # {2D pixel : 3D coordinates}
         self.image = None
         self.extrinsic = None
-        self.model = self.getModelFromFile()
+        self.model, self.model_reverse = self.getModelFromFile()
 
     def getModelFromFile(self):
-        model = {}
+        model, model_reverse = {}, {}
         tree = ET.parse(params["Localizer"]["model_file"])
         root = tree.getroot()
         for elem in root:  
@@ -37,7 +37,8 @@ class Localizer:
             ID = tuple([int(s) for s in tmp["ID"][1:-1].split(",")])
             coordinates =  tuple([float(s) for s in tmp["Coordinates"][1:-1].split(",")])
             model[ID] = coordinates
-        return model
+            model_reverse[coordinates] = ID
+        return model, model_reverse
 
     def select_by_mouse(self, event, x, y, flags, param):
         # if the left mouse button was clicked, record the starting
@@ -111,6 +112,11 @@ class Localizer:
                     self.init_pts[key] = self.model[tuple(real_origin_coordinates)]
                     break
 
+            xys = []
+            for value in  self.init_pts.values():
+                xys.append(self.model_reverse[value])
+            self.drawPoints(self.init_pts.keys(), xys, image_with_circles)
+
 
     def localize(self, image=None):
         """
@@ -169,10 +175,9 @@ class Localizer:
             self.drawPointsAndShow(points, xys, original_image.copy(), message=params["Localizer"]["message_moving"])
             k = cv2.waitKey()
         cv2.destroyAllWindows()
-
-        real_origin_coordinates = self.getRealOriginCoordinates()
+        # real_origin_coordinates = self.getRealOriginCoordinates()
         
-        fianl_extrinsic = self.computeExtrinsic(points, points3d_original, real_origin_coordinates)
+        fianl_extrinsic = self.computeExtrinsic(points, points3d_original)
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), H)[0]
         self.extrinsic = fianl_extrinsic.copy()
         
@@ -275,7 +280,7 @@ class Localizer:
         
         @param      image: the image
         @param      points: the list of 2D points
-        @param      xys: the list of 2D xy corrdinates
+        @param      xys: the list of 2D xy coordinates
         @param      message: the info writing on top of image
 
         @return     None
@@ -285,13 +290,21 @@ class Localizer:
             cv2.putText(image_with_points, message, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
         cv2.imshow("Find real origin", self.resize(image_with_points))
 
+    def drawCross(self, image, pt, color=(0, 255, 0), cross_length=20):
+        half_length1 = np.array([cross_length/2, cross_length/2])
+        half_length2 = np.array([cross_length/2, -cross_length/2])
+        pt = np.array(pt).astype(int)
+        cv2.line(image, tuple(pt - half_length1), tuple(pt + half_length1), color=color, thickness=3)
+        cv2.line(image, tuple(pt - half_length2), tuple(pt + half_length2), color=color, thickness=3)
+        return image
+
     def drawPoints(self, points, xys, image):
         """
         @brief      draw 2D point on image
         
         @param      image: the image
         @param      points: the list of 2D points
-        @param      xys: the list of 2D xy corrdinates
+        @param      xys: the list of 2D xy coordinates
         
         @return     painted image
         """
@@ -301,6 +314,7 @@ class Localizer:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2COLOR)
         for i, (pt, xy) in enumerate(zip(points, xys)):
             cv2.circle(image, tuple(np.array(pt).astype(int)), 10, (255, 0, 0), -1)
+            self.drawCross(image, pt)
             cv2.putText(image,'(%d, %d)' % (xy[0], xy[1]), (int(pt[0] + 10), int(pt[1] + 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2, cv2.LINE_AA)
         center_camera = self.camera.camera_C
         cv2.circle(image, (int(center_camera[0]), int(center_camera[1])), 10, (0, 255, 0), -1)
@@ -467,7 +481,7 @@ class Localizer:
         
         @return     2D points
         @return     3D points
-        @return     corresponding corrdinates in x, y
+        @return     corresponding coordinates in x, y
         """
         pts3d, xys, pts2d = [], [], []
         model_pts_values = np.array(self.model.values())
@@ -620,5 +634,5 @@ if __name__ == "__main__":
     localizer = Localizer()
     localizer.localize()
     print "extrinsic: \n", localizer.extrinsic
-    # localizer.testLocalization(extrinsic=extrinsic)
+    localizer.testLocalization(extrinsic=extrinsic)
     # localizer.testFiducialDetection()
