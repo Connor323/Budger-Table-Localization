@@ -54,30 +54,6 @@ class Localizer:
         if event == cv2.EVENT_LBUTTONDOWN:
             self.init_pts[find_detected_point(x, y)] = None
 
-    def getRealOriginCoordinates(self):
-        """
-        @brief      obtain the real-world coordinates for the origin point 
-                
-        @return     real_origin_coordinates: [x, y] where x, y are integer
-        """
-        real_origin_coordinates = None
-        while real_origin_coordinates is None:
-            tmp = raw_input("Please input the origin coordinates (x, y) in real world (default %d, %d): " %\
-                                 (params["Localizer"]["real_origin_coordinates"][0], params["Localizer"]["real_origin_coordinates"][1]))
-            try:
-                tmp = [int(ss) for ss in tmp.split(",")]
-            except ValueError:
-                if len(tmp) != 0:
-                    print "Input is not a valid format. Should be: x, y"
-                else:
-                    real_origin_coordinates = params["Localizer"]["real_origin_coordinates"]
-                continue
-            if len(tmp) == 2:
-                real_origin_coordinates = tmp
-            else:
-                print "Input is not a valid format. Should be: x, y"
-        return real_origin_coordinates
-
     def getInitPtsPairs(self, image_with_circles):
         """
         @brief      manually selected a number of detected-real world point pair
@@ -94,8 +70,8 @@ class Localizer:
 
             cv2.destroyWindow("Select points for computing initial points")
 
-            real_origin_coordinates = None
-            while real_origin_coordinates is None:
+            real_coordinates = None
+            while real_coordinates is None:
                 tmp = raw_input("Please input the model relative coordinates (x, y): ")
                 try:
                     tmp = [int(ss) for ss in tmp.split(",")]
@@ -103,13 +79,13 @@ class Localizer:
                     print "Input is not a valid format. Should be: x, y"
                     continue
                 if len(tmp) == 2:
-                    real_origin_coordinates = tmp
+                    real_coordinates = tmp
                 else:
                     print "Input is not a valid format. Should be: x, y"
             
             for key, item in self.init_pts.items():
                 if item is None:
-                    self.init_pts[key] = self.model[tuple(real_origin_coordinates)]
+                    self.init_pts[key] = self.model[tuple(real_coordinates)]
                     break
 
             xys = []
@@ -149,11 +125,11 @@ class Localizer:
             xyAline = True
 
         # use the initial pose for homography undistortion
-        image, H = self.solvePerspectiveDistortaion(image, init_extrinsic) 
+        undistort_image, H = self.solvePerspectiveDistortaion(image, init_extrinsic) 
 
         # use the undistorted image to detect budger
-        points = self.detector.detect(image)
-        image_with_circles = self.detector.drawKeypoints(image.copy())
+        points = self.detector.detect(undistort_image.copy())
+        image_with_circles = self.detector.drawKeypoints(undistort_image.copy())
 
         # project the points back to original image
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), np.linalg.inv(H))[0]
@@ -162,6 +138,8 @@ class Localizer:
 
         extrinsic = self.computeExtrinsic(points2d, points3d)
         points3d_original = points3d.copy()
+        
+        # find the origin in 3D points for rotation if needed
         origin_pt3d = sorted(xys, key = lambda x: (x[0], x[1]))[0]
         for idx, pt3d in enumerate(xys):
             if (origin_pt3d == pt3d).all():
@@ -175,7 +153,6 @@ class Localizer:
             self.drawPointsAndShow(points, xys, original_image.copy(), message=params["Localizer"]["message_moving"])
             k = cv2.waitKey()
         cv2.destroyAllWindows()
-        # real_origin_coordinates = self.getRealOriginCoordinates()
         
         fianl_extrinsic = self.computeExtrinsic(points, points3d_original)
         points = cv2.perspectiveTransform(np.array([points]).astype(np.float32), H)[0]
@@ -434,22 +411,17 @@ class Localizer:
             cv2.imshow("Detection Result", self.resize(image))
             cv2.waitKey()
 
-    def computeExtrinsic(self, pts2d, pts3d, real_origin_coordinates=None):
+    def computeExtrinsic(self, pts2d, pts3d):
         """
         @brief      using solvePnP to compute extrinsic matrix from 2D to 3D given points
         
         @param      pts2d  The points in piexls
         @param      pts3d  The points in real world
-        @param      real_origin_coordinates  The origin point coordinates in real world
         
         @return     The 3*4 extrinsic matrix
         """
         pts3d = np.array(pts3d).astype(np.float32)
         pts2d = np.array(pts2d).astype(np.float32)
-
-        if real_origin_coordinates is not None:
-            pts3d[:, 0] += real_origin_coordinates[0] * params["Localizer"]["budger_distance_3d"]
-            pts3d[:, 1] += real_origin_coordinates[1] * params["Localizer"]["budger_distance_3d"]
 
         ret, rvect, tvect = cv2.solvePnP(pts3d, pts2d, self.camera.camera_P, None)
         if not ret:
